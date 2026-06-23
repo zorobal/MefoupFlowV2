@@ -1,0 +1,6 @@
+{
+  "name": "Mefoup Flow",
+  "description": "Plateforme ERP integree pour la gestion agro-pastorale.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
