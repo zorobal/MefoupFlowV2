@@ -6,6 +6,7 @@
 import React, { useState, useRef } from 'react';
 import { SaaSClient, SaaSLog, TenantDatabase, SubscriptionPlan, Utilisateur } from '../types';
 import { isSupabaseConfigured, supabase, SupabaseSyncService } from '../lib/supabase';
+import { sqlSchemaFull } from './full_schema_sql';
 import {
   Users,
   Layers,
@@ -93,6 +94,7 @@ export default function SaaSAdmin({
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'success' | 'error'>('idle');
   const [syncMessage, setSyncMessage] = useState('');
   const [copiedSql, setCopiedSql] = useState(false);
+  const [sqlSchemaType, setSqlSchemaType] = useState<'minimal' | 'full'>('full');
 
   // Main SaaS tab for full console layout
   const [saasMainTab, setSaasMainTab] = useState<'clients' | 'billing' | 'tickets' | 'maintenance' | 'telemetry' | 'supabase'>('clients');
@@ -144,7 +146,7 @@ export default function SaaSAdmin({
     localStorage.setItem('saas_announcements', JSON.stringify(saasAnnouncements));
   }, [saasAnnouncements]);
 
-  const sqlSchema = `-- SCRIPT DE NETTOYAGE ET INITIALISATION SUPABASE
+  const sqlSchemaMinimal = `-- SCRIPT DE NETTOYAGE ET INITIALISATION SUPABASE
 -- IMPORTANT : Si vous obtenez l'erreur "invalid input syntax for type uuid",
 -- exécutez ce script pour supprimer les tables mal créées (ex: avec UUID par défaut)
 -- et les recréer proprement avec des clés primaires de type TEXT.
@@ -216,6 +218,8 @@ CREATE TABLE saas_invoices (
 
 ALTER TABLE saas_invoices ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Contrôle complet admin factures" ON saas_invoices FOR ALL USING (true);`;
+
+  const sqlSchema = sqlSchemaType === 'full' ? sqlSchemaFull : sqlSchemaMinimal;
 
   const handleSupabaseSync = async () => {
     setSyncStatus('syncing');
@@ -2306,6 +2310,23 @@ CREATE POLICY "Contrôle complet admin factures" ON saas_invoices FOR ALL USING 
                   className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-white px-2.5 py-1 rounded-lg transition cursor-pointer"
                 >
                   {copiedSql ? 'Copié !' : 'Copier le script'}
+                </button>
+              </div>
+
+              <div className="p-3 bg-slate-900 border-b border-slate-850 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSqlSchemaType('full')}
+                  className={`flex-1 py-1.5 px-2 rounded-lg text-[10px] font-black transition cursor-pointer text-center ${sqlSchemaType === 'full' ? 'bg-emerald-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-white'}`}
+                >
+                  Modèle ERP Complet (45+ Tables)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSqlSchemaType('minimal')}
+                  className={`flex-1 py-1.5 px-2 rounded-lg text-[10px] font-black transition cursor-pointer text-center ${sqlSchemaType === 'minimal' ? 'bg-emerald-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-white'}`}
+                >
+                  SaaS Admin Uniquement (4 Tables)
                 </button>
               </div>
 
