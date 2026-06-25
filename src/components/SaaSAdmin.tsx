@@ -5,6 +5,7 @@
 
 import React, { useState, useRef } from 'react';
 import { SaaSClient, SaaSLog, TenantDatabase, SubscriptionPlan, Utilisateur } from '../types';
+import { isSupabaseConfigured, supabase, SupabaseSyncService } from '../lib/supabase';
 import {
   Users,
   Layers,
@@ -87,9 +88,14 @@ export default function SaaSAdmin({
 
   // Tabs for the selected client details view
   const [activeDetailTab, setActiveDetailTab] = useState<'audit' | 'edit' | 'users'>('audit');
+  
+  // Supabase states
+  const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'success' | 'error'>('idle');
+  const [syncMessage, setSyncMessage] = useState('');
+  const [copiedSql, setCopiedSql] = useState(false);
 
   // Main SaaS tab for full console layout
-  const [saasMainTab, setSaasMainTab] = useState<'clients' | 'billing' | 'tickets' | 'maintenance' | 'telemetry'>('clients');
+  const [saasMainTab, setSaasMainTab] = useState<'clients' | 'billing' | 'tickets' | 'maintenance' | 'telemetry' | 'supabase'>('clients');
 
   // Support Tickets
   const [saasTickets, setSaasTickets] = useState<any[]>(() => {
@@ -137,6 +143,145 @@ export default function SaaSAdmin({
   React.useEffect(() => {
     localStorage.setItem('saas_announcements', JSON.stringify(saasAnnouncements));
   }, [saasAnnouncements]);
+
+  const sqlSchema = `-- 1. Table pour les Tenants (Clients SaaS)
+CREATE TABLE IF NOT EXISTS saas_tenants (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    subdomain TEXT UNIQUE,
+    plan_id TEXT,
+    status TEXT,
+    expires_at TEXT,
+    logo_url TEXT,
+    primary_color TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Active la sécurité niveau ligne (RLS)
+ALTER TABLE saas_tenants ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Lecture publique des tenants" ON saas_tenants FOR SELECT USING (true);
+CREATE POLICY "Contrôle complet administrateur" ON saas_tenants FOR ALL USING (true);
+
+-- 2. Table pour les logs d'activité d'audit
+CREATE TABLE IF NOT EXISTS saas_audit_logs (
+    id SERIAL PRIMARY KEY,
+    action TEXT NOT NULL,
+    details TEXT,
+    ip_address TEXT,
+    user_email TEXT,
+    tenant_id TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE saas_audit_logs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Contrôle complet admin logs" ON saas_audit_logs FOR ALL USING (true);
+
+-- 3. Table pour les tickets de support technique
+CREATE TABLE IF NOT EXISTS saas_tickets (
+    id TEXT PRIMARY KEY,
+    client_id TEXT,
+    client_name TEXT,
+    category TEXT,
+    title TEXT,
+    description TEXT,
+    priority TEXT,
+    status TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE saas_tickets ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Contrôle complet admin tickets" ON saas_tickets FOR ALL USING (true);
+
+-- 4. Table pour les factures et règlements multi-tenants
+CREATE TABLE IF NOT EXISTS saas_invoices (
+    id TEXT PRIMARY KEY,
+    client_name TEXT,
+    plan TEXT,
+    amount NUMERIC,
+    payment_method TEXT,
+    status TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE saas_invoices ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Contrôle complet admin factures" ON saas_invoices FOR ALL USING (true);`;
+
+  const handleSupabaseSync = async () => {
+    setSyncStatus('syncing');
+    setSyncMessage('Démarrage de la synchronisation...');
+    try {
+      if (!isSupabaseConfigured()) {
+        throw new Error("Supabase n'est pas configuré. Veuillez d'abord ajouter les variables d'environnement sur Vercel.");
+      }
+
+      // 1. Sync tenants (clients)
+      setSyncMessage('Synchronisation des Clients SaaS (saas_tenants)...');
+      for (const client of clients) {
+        await SupabaseSyncService.saveSaaSTenant({
+          id: client.id,
+          name: client.raisonSociale,
+          subdomain: client.sigle?.toLowerCase() || client.id,
+          planId: client.plan,
+          status: client.statut,
+          expiresAt: client.dateExpiration,
+          logoUrl: '',
+          primaryColor: '#4f46e5'
+        });
+      }
+
+      // 2. Sync logs
+      setSyncMessage("Synchronisation des logs d'audit...");
+      for (const log of logs) {
+        await supabase.from('saas_audit_logs').upsert({
+          id: parseInt(log.id.replace(/\D/g, '')) || undefined, // On essaie de parser en entier, sinon auto-généré
+          action: log.action,
+          details: `${log.module} - ${log.statut}`,
+          ip_address: log.ip || '127.0.0.1',
+          user_email: log.utilisateur || 'system',
+          tenant_id: null,
+          created_at: new Date(log.date).toISOString()
+        });
+      }
+
+      // 3. Sync tickets
+      setSyncMessage('Synchronisation des tickets de support (saas_tickets)...');
+      for (const ticket of saasTickets) {
+        await supabase.from('saas_tickets').upsert({
+          id: ticket.id,
+          client_id: ticket.clientId,
+          client_name: ticket.clientName,
+          category: ticket.category,
+          title: ticket.title,
+          description: ticket.desc,
+          priority: ticket.priority,
+          status: ticket.status,
+          created_at: new Date(ticket.date).toISOString()
+        });
+      }
+
+      // 4. Sync invoices
+      setSyncMessage('Synchronisation des factures (saas_invoices)...');
+      for (const invoice of saasInvoices) {
+        await supabase.from('saas_invoices').upsert({
+          id: invoice.id,
+          client_name: invoice.clientName,
+          plan: invoice.plan,
+          amount: invoice.amount,
+          payment_method: invoice.method,
+          status: invoice.status,
+          created_at: new Date(invoice.date).toISOString()
+        });
+      }
+
+      setSyncStatus('success');
+      setSyncMessage('Toutes les données ont été synchronisées avec succès vers votre instance Supabase ! Vous pouvez les consulter directement dans votre éditeur de tables Supabase.');
+    } catch (err: any) {
+      console.error(err);
+      setSyncStatus('error');
+      setSyncMessage(err.message || 'Erreur lors de la synchronisation. Assurez-vous d\'avoir créé les tables à l\'aide du script SQL à droite.');
+    }
+  };
 
   // Ticket detail selection state
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
@@ -868,6 +1013,13 @@ export default function SaaSAdmin({
           className={`px-4 py-2.5 rounded-xl text-xs font-black transition flex items-center gap-2 cursor-pointer ${saasMainTab === 'telemetry' ? 'bg-white shadow-xs text-indigo-700' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/50'}`}
         >
           <Cpu className="h-4 w-4" /> 💻 Télémétrie & Logs
+        </button>
+        <button
+          type="button"
+          onClick={() => setSaasMainTab('supabase')}
+          className={`px-4 py-2.5 rounded-xl text-xs font-black transition flex items-center gap-2 cursor-pointer ${saasMainTab === 'supabase' ? 'bg-[#12b886]/10 text-[#0ca678] border border-[#12b886]/20' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/50'}`}
+        >
+          <Database className="h-4 w-4 text-[#0ca678]" /> ⚡ Intégration Supabase
         </button>
       </div>
 
@@ -1979,6 +2131,182 @@ export default function SaaSAdmin({
               ) : (
                 <div className="text-center py-6 text-slate-500 italic">Aucun log enregistré dans la session en cours.</div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {saasMainTab === 'supabase' && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 text-left">
+          {/* Synchronisation Control Panel (7 cols) */}
+          <div className="lg:col-span-7 space-y-6">
+            <div className="bg-white rounded-2xl border p-6 shadow-xs">
+              <h3 className="text-base font-black text-slate-800 flex items-center gap-2 mb-2">
+                <Database className="h-5 w-5 text-emerald-600" />
+                Console de Synchronisation Supabase
+              </h3>
+              <p className="text-xs text-slate-500 mb-6 leading-relaxed">
+                Notre ERP fonctionne par défaut avec des bases de données locales simulées dans votre navigateur (<code className="bg-slate-100 text-slate-700 px-1 rounded">localStorage</code>). 
+                L'intégration Supabase vous permet de connecter une véritable base PostgreSQL de production pour centraliser et sécuriser vos données d'administration SaaS.
+              </p>
+
+              {/* Status Indicator */}
+              <div className="p-4 rounded-xl border mb-6 flex items-start gap-4 bg-slate-50">
+                <div className="mt-1">
+                  {isSupabaseConfigured() ? (
+                    <div className="h-3.5 w-3.5 bg-emerald-500 rounded-full animate-pulse border border-emerald-300"></div>
+                  ) : (
+                    <div className="h-3.5 w-3.5 bg-amber-500 rounded-full border border-amber-300"></div>
+                  )}
+                </div>
+                <div className="space-y-1">
+                  <div className="text-xs font-bold text-slate-750 uppercase tracking-wider">
+                    Statut de la connexion
+                  </div>
+                  {isSupabaseConfigured() ? (
+                    <div>
+                      <p className="text-xs text-emerald-700 font-extrabold flex items-center gap-1.5">
+                        ✓ Connecté à votre instance Supabase
+                      </p>
+                      <p className="text-[10px] text-slate-500 font-mono mt-1 select-all break-all bg-white px-2 py-1 rounded border">
+                        {((import.meta as any).env?.VITE_SUPABASE_URL)}
+                      </p>
+                    </div>
+                  ) : (
+                    <div>
+                      <p className="text-xs text-amber-600 font-extrabold">
+                        ⚠️ Non Configuré (Mode Démonstration Local)
+                      </p>
+                      <p className="text-[11px] text-slate-500 leading-relaxed mt-1 font-semibold">
+                        Pour connecter votre projet, vous devez déclarer les variables d'environnement <code className="font-mono bg-white px-1 py-0.5 border rounded">VITE_SUPABASE_URL</code> et <code className="font-mono bg-white px-1 py-0.5 border rounded">VITE_SUPABASE_ANON_KEY</code> dans les paramètres de votre déploiement Vercel ou dans votre fichier <code className="font-mono bg-white px-1 py-0.5 border rounded">.env</code>.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Local Storage Telemetry / Data to Sync */}
+              <div className="space-y-3 mb-6">
+                <h4 className="text-xs font-black text-slate-700 uppercase tracking-wider">Données prêtes à la synchronisation</h4>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="bg-slate-50 p-3 rounded-xl border flex justify-between items-center">
+                    <div>
+                      <p className="text-[10px] font-bold text-slate-400 uppercase">Instances SaaS (Clients)</p>
+                      <p className="text-sm font-black text-slate-800">{clients.length}</p>
+                    </div>
+                    <span className="text-[10px] bg-slate-200 text-slate-750 px-2 py-0.5 rounded-full font-bold">saas_tenants</span>
+                  </div>
+
+                  <div className="bg-slate-50 p-3 rounded-xl border flex justify-between items-center">
+                    <div>
+                      <p className="text-[10px] font-bold text-slate-400 uppercase">Audit & logs</p>
+                      <p className="text-sm font-black text-slate-800">{logs.length}</p>
+                    </div>
+                    <span className="text-[10px] bg-slate-200 text-slate-750 px-2 py-0.5 rounded-full font-bold">saas_audit_logs</span>
+                  </div>
+
+                  <div className="bg-slate-50 p-3 rounded-xl border flex justify-between items-center">
+                    <div>
+                      <p className="text-[10px] font-bold text-slate-400 uppercase">Tickets de Support</p>
+                      <p className="text-sm font-black text-slate-800">{saasTickets.length}</p>
+                    </div>
+                    <span className="text-[10px] bg-slate-200 text-slate-750 px-2 py-0.5 rounded-full font-bold">saas_tickets</span>
+                  </div>
+
+                  <div className="bg-slate-50 p-3 rounded-xl border flex justify-between items-center">
+                    <div>
+                      <p className="text-[10px] font-bold text-slate-400 uppercase">Règlements & Factures</p>
+                      <p className="text-sm font-black text-slate-800">{saasInvoices.length}</p>
+                    </div>
+                    <span className="text-[10px] bg-slate-200 text-slate-750 px-2 py-0.5 rounded-full font-bold">saas_invoices</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Sync Button & Info Message */}
+              <div className="space-y-4">
+                <button
+                  type="button"
+                  disabled={!isSupabaseConfigured() || syncStatus === 'syncing'}
+                  onClick={handleSupabaseSync}
+                  className={`w-full py-3 px-4 rounded-xl text-xs font-black text-white flex items-center justify-center gap-2 cursor-pointer transition ${
+                    !isSupabaseConfigured()
+                      ? 'bg-slate-300 cursor-not-allowed'
+                      : syncStatus === 'syncing'
+                      ? 'bg-amber-500 animate-pulse'
+                      : 'bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99]'
+                  }`}
+                >
+                  <RefreshCw className={`h-4 w-4 ${syncStatus === 'syncing' ? 'animate-spin' : ''}`} />
+                  {syncStatus === 'syncing' ? 'Synchronisation en cours...' : 'Pousser les données vers Supabase (PostgreSQL)'}
+                </button>
+
+                {syncStatus !== 'idle' && (
+                  <div className={`p-4 rounded-xl text-xs leading-relaxed border ${
+                    syncStatus === 'success' 
+                      ? 'bg-emerald-55 border-emerald-200 text-emerald-800 font-bold'
+                      : syncStatus === 'error'
+                      ? 'bg-rose-55 border-rose-200 text-rose-800 font-bold'
+                      : 'bg-amber-55 border-amber-200 text-amber-800'
+                  }`}>
+                    {syncMessage}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* How to view in Supabase explanations */}
+            <div className="bg-indigo-50 border border-indigo-100 rounded-2xl p-6 space-y-4">
+              <h4 className="text-xs font-black text-indigo-900 uppercase tracking-wider flex items-center gap-1.5">
+                <HelpCircle className="h-4 w-4 text-indigo-600" />
+                Comment visualiser vos données dans Supabase ?
+              </h4>
+              <ol className="list-decimal pl-4 text-xs text-indigo-950 space-y-3 font-semibold">
+                <li>
+                  Rendez-vous sur votre <strong className="text-indigo-900 font-black">Table Editor</strong> sur le <a href="https://supabase.com" target="_blank" rel="noopener noreferrer" className="underline text-indigo-700 hover:text-indigo-800 font-bold">tableau de bord Supabase</a>.
+                </li>
+                <li>
+                  Sélectionnez votre projet et ouvrez l'onglet <strong className="text-indigo-900 font-black">Table Editor</strong> (icône de table dans la barre latérale gauche).
+                </li>
+                <li>
+                  Vous y verrez les tables créées (comme <code className="bg-white px-1 py-0.5 rounded border text-indigo-700">saas_tenants</code>). Cliquez dessus pour visualiser les lignes synchronisées en temps réel !
+                </li>
+                <li>
+                  Toutes les données d'administration SaaS créées ou modifiées de l'ERP pourront être lues ou écrites directement sur ces tables PostgreSQL.
+                </li>
+              </ol>
+            </div>
+          </div>
+
+          {/* SQL Editor Code Block (5 cols) */}
+          <div className="lg:col-span-5 space-y-4">
+            <div className="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden shadow-lg flex flex-col h-full">
+              <div className="p-4 bg-slate-950 border-b border-slate-800 flex justify-between items-center">
+                <div className="flex items-center gap-2">
+                  <Terminal className="h-4 w-4 text-emerald-400" />
+                  <span className="text-xs font-bold text-slate-300 font-mono">Script SQL d'initialisation</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(sqlSchema);
+                    setCopiedSql(true);
+                    setTimeout(() => setCopiedSql(false), 2000);
+                  }}
+                  className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 text-white px-2.5 py-1 rounded-lg transition cursor-pointer"
+                >
+                  {copiedSql ? 'Copié !' : 'Copier le script'}
+                </button>
+              </div>
+
+              <div className="p-4 bg-slate-950 flex-1 overflow-y-auto max-h-[500px]">
+                <p className="text-[11px] text-slate-400 leading-relaxed mb-4 font-sans">
+                  Exécutez ce script SQL dans l'onglet <strong className="text-slate-300">SQL Editor</strong> de Supabase pour créer la structure des tables PostgreSQL nécessaires à l'ERP.
+                </p>
+                <pre className="text-[10px] text-emerald-400 font-mono overflow-x-auto whitespace-pre leading-relaxed select-all">
+                  {sqlSchema}
+                </pre>
+              </div>
             </div>
           </div>
         </div>
