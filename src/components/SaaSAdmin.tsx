@@ -144,8 +144,18 @@ export default function SaaSAdmin({
     localStorage.setItem('saas_announcements', JSON.stringify(saasAnnouncements));
   }, [saasAnnouncements]);
 
-  const sqlSchema = `-- 1. Table pour les Tenants (Clients SaaS)
-CREATE TABLE IF NOT EXISTS saas_tenants (
+  const sqlSchema = `-- SCRIPT DE NETTOYAGE ET INITIALISATION SUPABASE
+-- IMPORTANT : Si vous obtenez l'erreur "invalid input syntax for type uuid",
+-- exécutez ce script pour supprimer les tables mal créées (ex: avec UUID par défaut)
+-- et les recréer proprement avec des clés primaires de type TEXT.
+
+DROP TABLE IF EXISTS saas_tickets;
+DROP TABLE IF EXISTS saas_audit_logs;
+DROP TABLE IF EXISTS saas_invoices;
+DROP TABLE IF EXISTS saas_tenants;
+
+-- 1. Table pour les Tenants (Clients SaaS)
+CREATE TABLE saas_tenants (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     subdomain TEXT UNIQUE,
@@ -164,7 +174,7 @@ CREATE POLICY "Lecture publique des tenants" ON saas_tenants FOR SELECT USING (t
 CREATE POLICY "Contrôle complet administrateur" ON saas_tenants FOR ALL USING (true);
 
 -- 2. Table pour les logs d'activité d'audit
-CREATE TABLE IF NOT EXISTS saas_audit_logs (
+CREATE TABLE saas_audit_logs (
     id SERIAL PRIMARY KEY,
     action TEXT NOT NULL,
     details TEXT,
@@ -178,7 +188,7 @@ ALTER TABLE saas_audit_logs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Contrôle complet admin logs" ON saas_audit_logs FOR ALL USING (true);
 
 -- 3. Table pour les tickets de support technique
-CREATE TABLE IF NOT EXISTS saas_tickets (
+CREATE TABLE saas_tickets (
     id TEXT PRIMARY KEY,
     client_id TEXT,
     client_name TEXT,
@@ -194,7 +204,7 @@ ALTER TABLE saas_tickets ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Contrôle complet admin tickets" ON saas_tickets FOR ALL USING (true);
 
 -- 4. Table pour les factures et règlements multi-tenants
-CREATE TABLE IF NOT EXISTS saas_invoices (
+CREATE TABLE saas_invoices (
     id TEXT PRIMARY KEY,
     client_name TEXT,
     plan TEXT,
